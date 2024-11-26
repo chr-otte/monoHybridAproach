@@ -17,7 +17,6 @@ class KITTIRawDataset(Dataset):
         self.root_dir = root_dir
         self.sequences = sequences  # sequences of directories for data
         self.transform = transforms.Compose([
-            transforms.Resize((192, 640)),  # Resizes image to 192, 640 (H,W) to lower processing time.
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.3706, 0.3861, 0.3680],  # KITTI calculated mean
             std=[0.3059, 0.3125, 0.3136])                        # KITTI calculated std

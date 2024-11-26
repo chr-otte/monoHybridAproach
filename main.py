@@ -20,7 +20,7 @@ import cv2
 import kornia
 
 
-def train_hybrid_depth(mono_model, stereo_model, optimizer,
+def train_hybrid_depth(mono_model, stereo_model, optimizer, scaler,
                        frame_t_minus, frame_t, frame_t_plus,
                        stereo_left, stereo_right, debug = False):
     # Stack adjacent frames
@@ -49,7 +49,6 @@ def train_hybrid_depth(mono_model, stereo_model, optimizer,
             loss = torch.abs(pred_depth - target_depth).mean()
             total_loss += loss
 
-
     return total_loss, depth_outputs
 
 
@@ -58,8 +57,10 @@ def train(mono_model, stereo_model, train_loader, num_epochs=10, learning_rate=1
     mono_model = mono_model.to(device)
     stereo_model = stereo_model.to(device)
     stereo_model.eval()  # Set stereo model to eval mode
+
     total_loss = 0
     optimizer = torch.optim.Adam(mono_model.parameters(), lr=learning_rate)
+    scaler = torch.cuda.amp.GradScaler()  # For mixed precision training
     visualization_freq = 50  # Visualize every 50 batches
 
     for epoch in range(num_epochs):
@@ -73,16 +74,18 @@ def train(mono_model, stereo_model, train_loader, num_epochs=10, learning_rate=1
             optimizer.zero_grad()
 
             loss, depth_outputs = train_hybrid_depth(
-                mono_model, stereo_model, optimizer,
+                mono_model, stereo_model, optimizer, scaler,
                 src_images[0],  # t-1 frame
                 src_images[1],  # t frame
                 src_images[2],  # t+1 frame
                 stereo_images[0],  # left image
                 stereo_images[1]   # right image
             )
+            # Scaled backward pass
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
-            loss.backward()
-            optimizer.step()
             train_loss += loss.item()
             total_loss += loss.item()
 

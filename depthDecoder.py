@@ -52,24 +52,28 @@ class DepthDecoder(nn.Module):
         for i in range(4, -1, -1):
             # Upsample the current feature map
             x = F.relu(self.convs[f"bn_{i}"](self.convs[f"upconv_{i}"](x)))
-            if debug:
-                print(f"After upconv_{i}: {x.shape}")
 
             if i > 0:
-                # Upsample to match the spatial resolution of the skip connection
-                x = F.interpolate(x, scale_factor=2, mode='nearest')
+                # Get target dimensions from the skip connection
+                target_size = input_features[i - 1].shape[-2:]
+
+                # Upsample to match the skip connection size exactly
+                x = F.interpolate(
+                    x,
+                    size=target_size,  # Use exact target size
+                    mode='bilinear',
+                    align_corners=True
+                )
+
                 if debug:
-                    print(f"Upsampled feature at scale {i}: {x.shape}")
+                    print(f"After upsample: x shape = {x.shape}")
+                    print(f"Skip connection shape = {input_features[i - 1].shape}")
 
                 # Concatenate with the corresponding encoder feature
                 x = torch.cat([x, input_features[i - 1]], dim=1)
-                if debug:
-                    print(f"Concatenated feature at scale {i}: {x.shape}")
 
-                # Process concatenated features to reduce channels
+                # Process concatenated features
                 x = F.relu(self.convs[f"conv_{i}_1"](x))
-                if debug:
-                    print(f"Processed feature at scale {i}: {x.shape}")
 
             # Generate depth output for the requested scales
             if i in self.scales:
