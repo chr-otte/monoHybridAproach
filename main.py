@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
 from torchvision import models
-from encoder import SharedResNet18Encoder
+from Models.TemporalImages.encoder import SharedResNet18Encoder as Base_SharedRedNet18Encoder
 import torch
 import torchvision.transforms as transforms
 from PIL import Image
 from KITTIDataset import KITTIRawDataset
+from AugmentedKITTIDataset import AugmentedKITTIDataset
 import os
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -13,16 +14,23 @@ from torch import nn
 from torch.nn import functional as F
 from torchvision import models, transforms
 from PIL import Image
-from MonocularDepthNet import MonocularDepthNet
-from StereoDepthModel import StereoModel
+from Models.TemporalImages.StereoDepthModel import StereoModel as BaseSteroModel
+from Models.TemporalImages.MonocularDepthNet import MonocularDepthNet as BaseMonocularDepthNet
+from Models.FullScaleImages.MonocularDepthNet import MonocularDepthNet as FullScaleMonocularDepthNet
+from Models.Resnet50.MonocularDepthNet import MonocularDepthNet as Resnet50DetphNet
+from Models.SingleImage.MonocularDepthNet import MonocularDepthNet as SingleFrameDepthNet
+from Models.DenseConnections.MonocularDepthNet import MonocularDepthNet as DenseMonocularDepthNet
+
+
 import numpy as np
 import cv2
 import kornia
+import random
+import pandas as pd
 
-
-def train_hybrid_depth(mono_model, stereo_model, optimizer,
+def train_hybrid_depth(mono_model, optimizer,
                        frame_t_minus, frame_t, frame_t_plus,
-                       stereo_left, stereo_right, debug = False):
+                       stereo_left, stereo_right, ground_truth, debug = False):
     # Stack adjacent frames
     input_frames = torch.cat([frame_t_minus, frame_t, frame_t_plus], dim=1)
 
@@ -31,8 +39,7 @@ def train_hybrid_depth(mono_model, stereo_model, optimizer,
 
     # Calculate stereo depth at full resolution
     with torch.no_grad():
-        stereo_outputs = stereo_model(stereo_left, stereo_right)  # Stereo images are full resolution
-        full_res_depth = stereo_outputs['depth']
+        full_res_depth = ground_truth.to('cuda')
 
     # Calculate loss at multiple scales
     total_loss = 0
@@ -53,14 +60,15 @@ def train_hybrid_depth(mono_model, stereo_model, optimizer,
     return total_loss, depth_outputs
 
 
-def train(mono_model, stereo_model, train_loader, num_epochs=10, learning_rate=1e-4):
+def train(mono_model, train_loader, validation_loader, num_epochs=10, learning_rate=1e-4):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     mono_model = mono_model.to(device)
-    stereo_model = stereo_model.to(device)
-    stereo_model.eval()  # Set stereo model to eval mode
     total_loss = 0
     optimizer = torch.optim.Adam(mono_model.parameters(), lr=learning_rate)
-    visualization_freq = 50  # Visualize every 50 batches
+    visualization_freq = 10  # Visualize every 50 batches
+
+    batch_loss = []
+    validation_loss = []
 
     for epoch in range(num_epochs):
         mono_model.train()
@@ -73,12 +81,13 @@ def train(mono_model, stereo_model, train_loader, num_epochs=10, learning_rate=1
             optimizer.zero_grad()
 
             loss, depth_outputs = train_hybrid_depth(
-                mono_model, stereo_model, optimizer,
+                mono_model,  optimizer,
                 src_images[0],  # t-1 frame
                 src_images[1],  # t frame
                 src_images[2],  # t+1 frame
                 stereo_images[0],  # left image
-                stereo_images[1]   # right image
+                stereo_images[1],   # right image
+                batch["ground_truth"]
             )
 
             loss.backward()
@@ -89,8 +98,7 @@ def train(mono_model, stereo_model, train_loader, num_epochs=10, learning_rate=1
             if batch_idx % visualization_freq == 0:
                 with torch.no_grad():
                     # Get ground truth depth from stereo model
-                    stereo_output = stereo_model(stereo_images[0], stereo_images[1])
-                    gt_depth = stereo_output['depth']
+                    gt_depth = batch["ground_truth"]
 
                     # Get predicted depth at finest scale
                     pred_depth = depth_outputs[("depth", 0)]
@@ -103,8 +111,7 @@ def train(mono_model, stereo_model, train_loader, num_epochs=10, learning_rate=1
                             mode='bilinear',
                             align_corners=True
                         )
-
-                    # Visualize
+                    batch_loss.append(loss.item())
                     # Visualize
                     visualize_results(
                         epoch,
@@ -116,7 +123,31 @@ def train(mono_model, stereo_model, train_loader, num_epochs=10, learning_rate=1
                     )
 
                 print(f'Epoch {epoch}, Batch {batch_idx}, Loss: {loss.item():.4f}')
+        # Validation phase
+        mono_model.eval()
+        total_val_loss = 0
 
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(validation_loader):
+                src_images = [img.to(device) for img in batch['src_images']]
+                stereo_images = [img.to(device) for img in batch['stereo_images']]
+                ground_truth = batch['ground_truth'].to(device)
+
+                # Compute validation loss
+                loss, _ = train_hybrid_depth(
+                    mono_model, optimizer,
+                    src_images[0],  # t-1 frame
+                    src_images[1],  # t frame
+                    src_images[2],  # t+1 frame
+                    stereo_images[0],  # left image
+                    stereo_images[1],  # right image
+                    ground_truth
+                )
+
+                total_val_loss += loss.item()
+        avg_val_loss = total_val_loss / len(validation_loader)
+        validation_loss.append(avg_val_loss)
+        print(f'Epoch {epoch} Validation Complete, Average Validation Loss: {avg_val_loss:.4f}')
         avg_loss = total_loss / len(train_loader)
         print(f'Epoch {epoch} complete, Average Loss: {avg_loss:.4f}')
 
@@ -128,6 +159,8 @@ def train(mono_model, stereo_model, train_loader, num_epochs=10, learning_rate=1
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_loss,
             }, f'mono_depth_checkpoint_epoch_{epoch + 1}.pth')
+    return batch_loss, validation_loss
+
 
 
 def visualize_results(epoch, batch_idx, input_image, pred_depth, gt_depth, save_dir="visualization"):
@@ -190,25 +223,125 @@ def visualize_results(epoch, batch_idx, input_image, pred_depth, gt_depth, save_
     plt.close()
 
 
-    # Main execution
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def get_data(i):
+    start_train = 0
+    end_train = 100
+    start_val = 100
+    end_val = 102
+    if(i==0):
+        train_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_train, end=end_train, camera_left="image_02", camera_right="image_03")
+        val_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_val, end=end_val, camera_left="image_02", camera_right="image_03")
+        name = "Basemodel"
+        mono_model = BaseMonocularDepthNet(pretrained=True)
+
+    elif(i==1):
+        train_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_train, end=end_train, contrast=0.3, camera_left="image_02", camera_right="image_03")
+        val_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_val, end=end_val, contrast=0.3, camera_left="image_02", camera_right="image_03")
+        name = "Basemodel - Contrast 0.3"
+        mono_model = BaseMonocularDepthNet(pretrained=True)
+
+    elif(i==2):
+        train_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_train, end=end_train, contrast=0.3, camera_left="image_00", camera_right="image_01")
+        val_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_val, end=end_val, contrast=0.3, camera_left="image_00", camera_right="image_01")
+        name = "Basemodel - Contrast 0.3 GreayScale"
+        mono_model = BaseMonocularDepthNet(pretrained=True)
+
+    elif(i==3):
+        train_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_train, end=end_train, camera_left="image_00", camera_right="image_01")
+        val_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_val, end=end_val, camera_left="image_00", camera_right="image_01")
+        name = "Basemodel - GreayScale"
+        mono_model = BaseMonocularDepthNet(pretrained=True)
+
+    elif(i==4):
+        train_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_train, end=end_train, camera_left="image_02", camera_right="image_03", full_scale=True)
+        val_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences , start=start_val, end=end_val, camera_left="image_02", camera_right="image_03", full_scale=True)
+        name = "Fullscale"
+        mono_model = FullScaleMonocularDepthNet(pretrained=True)
+
+    elif(i==5):
+        train_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, camera_left="image_02", camera_right="image_03")
+        val_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences , start=start_val, end=end_val, camera_left="image_02", camera_right="image_03")
+        name = "Resnet50"
+        mono_model = Resnet50DetphNet(pretrained=True)
+
+    elif(i==6):
+        train_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_train, end=end_train, camera_left="image_02", camera_right="image_03")
+        val_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_val, end=end_val, camera_left="image_02", camera_right="image_03")
+        name = "SingleFrame"
+        mono_model = SingleFrameDepthNet(pretrained=True)
+
+    elif(i==7):
+        train_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_train, end=end_train, camera_left="image_02", camera_right="image_03")
+        val_dataset = AugmentedKITTIDataset(root_dir=root_dir, sequences=train_sequences, start=start_val, end=end_val, camera_left="image_02", camera_right="image_03")
+        name = "DenseConnections"
+        mono_model = DenseMonocularDepthNet(pretrained=True)
+
+    return mono_model, train_dataset, val_dataset, name
+
+
+
 if __name__ == "__main__":
     # Sequences for training and validation
     train_sequences = ['2011_09_26']
     val_sequences = ['2011_09_30', '2011_10_03']
 
+    # Set manual seeds for reproducibility
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    torch.cuda.manual_seed_all(42)  # If using multi-GPU setups
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    np.random.seed(42)
+    random.seed(42)
+
+    # Create a PyTorch generator with a fixed seed
+    generator = torch.Generator()
+    generator.manual_seed(42)
+
     root_dir = 'C:/Github/monodepth2/kitti_data'
 
-    # Create datasets
-    train_dataset = KITTIRawDataset(root_dir=root_dir, sequences=train_sequences)
-    #val_dataset = KITTIRawDataset(root_dir=root_dir, sequences=val_sequences)
+    for i in range(8):
+        mono_model, train_dataset, val_dataset, name = get_data(i)
 
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=8, drop_last=True)
-    #val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4, drop_last=False)
+        # Create DataLoader with consistent shuffling
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=4,
+            shuffle=True,  # Shuffling is deterministic with the fixed seed
+            num_workers=4,
+            worker_init_fn=seed_worker,
+            pin_memory=True,
+            generator=generator
+        )
 
-    # Initialize models
-    mono_model = MonocularDepthNet(pretrained=True)
-    stereo_model = StereoModel()
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset,
+            batch_size=4,
+            shuffle=True,  # Shuffling is deterministic with the fixed seed
+            num_workers=4,
+            worker_init_fn=seed_worker,
+            pin_memory=True,
+            generator=generator
+        )
 
-    # Train
-    train(mono_model, stereo_model, train_loader)
+
+        # Train
+        batch_loss, validation_loss = train(mono_model, train_loader, val_loader, num_epochs=2)
+        batch_loss_df = pd.DataFrame({
+            "index": range(len(batch_loss)),
+            "Batch_Loss": batch_loss,
+        })
+        batch_loss_df.to_csv(f"batch_loss_{name}.csv", index=False)
+
+        val_loss_df = pd.DataFrame({
+            "index": range(len(validation_loss)),
+            "Validation_Loss": validation_loss
+        })
+        val_loss_df.to_csv(f"validation_loss_{name}.csv", index=False)
+
