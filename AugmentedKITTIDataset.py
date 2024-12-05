@@ -20,7 +20,7 @@ def get_hashed_filename(left_img_path, right_img_path):
     return f"disparity_{hashed}.pth"
 
 class AugmentedKITTIDataset(Dataset):
-    def __init__(self, root_dir, sequences, camera_left='image_00', camera_right='image_01', brightness=0.0, contrast=0.0, saturation=0.0, hue=0.0, seed=42, start=0, end = 100, full_scale = False):
+    def __init__(self, root_dir, sequences, camera_left='image_02', camera_right='image_03', brightness=0.0, sharpen_image = False, contrast=0.0, saturation=0.0, hue=0.0, seed=42, start=0, end = 100, full_scale = False):
         self.root_dir = root_dir
         self.sequences = sequences
 
@@ -29,11 +29,10 @@ class AugmentedKITTIDataset(Dataset):
         self.contrast = contrast
         self.saturation = saturation
         self.hue = hue
+        self.sharpen_image = sharpen_image
 
         # Store seed for reproducibility
         self.seed = seed
-
-        # TemporalImages transform
 
         if full_scale:
             self.base_transform = transforms.Compose([
@@ -118,7 +117,6 @@ class AugmentedKITTIDataset(Dataset):
                     right_tensor = self.base_transform(right_img).unsqueeze(0).cuda()
 
                     with torch.no_grad():
-
                         result = model(left_tensor, right_tensor)
                         depth_map = result['depth'].squeeze(0).cpu()
 
@@ -149,6 +147,8 @@ class AugmentedKITTIDataset(Dataset):
                 img = transforms.functional.adjust_saturation(img, 1.0 + self.saturation)
             if self.hue != 0:
                 img = transforms.functional.adjust_hue(img, self.hue)
+            if self.sharpen_image:
+                img = enhance_image(img)
 
             # TemporalImages transforms
             img = transforms.functional.resize(img, (192, 640))
@@ -184,7 +184,7 @@ def verify_specific_augmentation(dataset, num_samples=1):
 
     for sample_idx in range(num_samples):
         # Get random sample index
-        idx = 100
+        idx = 1
 
         # Load original image directly
         sample = dataset.samples[idx]
@@ -216,17 +216,55 @@ def verify_specific_augmentation(dataset, num_samples=1):
     plt.tight_layout()
     plt.show()
 
+
+def sharpen_image(img, amount=1.0):
+    blurred = transforms.GaussianBlur(kernel_size=3)(img)
+    sharpened = img + amount * (img - blurred)
+    return torch.clamp(sharpened, 0, 1)
+
+
+def enhance_edges(img):
+    import torch.nn.functional as F
+
+    # Sobel filters for edge detection
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).reshape(1, 1, 3, 3)
+    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).reshape(1, 1, 3, 3)
+
+    # Apply filters
+    edges_x = F.conv2d(img, sobel_x, padding=1)
+    edges_y = F.conv2d(img, sobel_y, padding=1)
+    edges = torch.sqrt(edges_x ** 2 + edges_y ** 2)
+
+    # Combine with original image
+    enhanced = img + edges
+    return torch.clamp(enhanced, 0, 1)
+
+
+def enhance_image(img, sharpen_amount=2.0, contrast=0.0):
+    contrast = 0
+    # Convert PIL Image to tensor
+    img_tensor = transforms.ToTensor()(img)
+
+    # Apply Gaussian blur
+    blurred = transforms.GaussianBlur(kernel_size=3)(img_tensor)
+
+    # Sharpen
+    sharpened = img_tensor + sharpen_amount * (img_tensor - blurred)
+    sharpened = torch.clamp(sharpened, 0, 1)
+
+    return transforms.ToPILImage()(sharpened)
+
 # Usage example:
 if __name__ == "__main__":
     # Create dataset with color augmentation
     root_dir = 'C:/Github/monodepth2/kitti_data'
     sequences = ['2011_09_26']
-    brightness_test = AugmentedKITTIDataset(root_dir, sequences, brightness=0.3)
-    contrast_test = AugmentedKITTIDataset(root_dir, sequences, contrast=0.3)
-    saturation = AugmentedKITTIDataset(root_dir, sequences, saturation=0.3)
-    combined_test = AugmentedKITTIDataset(root_dir, sequences,brightness=0.3, contrast=0.3, saturation=0.3)
+    #brightness_test = AugmentedKITTIDataset(root_dir, sequences, brightness=0.3)
+    contrast_test = AugmentedKITTIDataset(root_dir, sequences, sharpen_image=True)
+    #saturation = AugmentedKITTIDataset(root_dir, sequences, saturation=0.3)
+    #combined_test = AugmentedKITTIDataset(root_dir, sequences,brightness=0.3, contrast=0.3, saturation=0.3)
 
-    verify_specific_augmentation(brightness_test)
     verify_specific_augmentation(contrast_test)
-    verify_specific_augmentation(saturation)
-    verify_specific_augmentation(combined_test)
+    #verify_specific_augmentation(saturation)
+    #verify_specific_augmentation(combined_test)
+    #verify_specific_augmentation(brightness_test)

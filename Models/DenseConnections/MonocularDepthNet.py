@@ -20,3 +20,4 @@ class MonocularDepthNet(nn.Module):
             skip_connections['layer4']
         ]
         return self.decoder(encoder_features)
+
