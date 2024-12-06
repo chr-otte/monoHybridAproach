@@ -40,11 +40,6 @@ generator.manual_seed(42)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def seed_worker(worker_id):
-    worker_seed = torch.initial_seed() % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-
 
 mono_model = DenseMonocularDepthNet()
 mono_model.load_state_dict(torch.load('C:\Github\monoHybridAproach\SupervisedApproach\TrainedModels\DenseConnections_mono_depth_checkpoint_epoch_20.pth')['model_state_dict'])
